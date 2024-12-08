@@ -1,0 +1,240 @@
+---
+title: "COVID data final project 2"
+author: "Qilian Luo"
+date: "2024-12-01"
+output: html_document
+---
+These datasets are the time series summary section of the Johns Hopkins COVID data on Github. They include two US confirmed cases and deaths, reported at the county level and two global confirmed cases and deaths.A data look-up table provided within the same dataset is also used to obtain population detail of the global data. For more detail about this dataset, please refer to <https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data>.
+
+Packages needed for this project to run includes:
+
+* maps
+
+* dplyr
+
+* ggplot2
+
+
+I'm interested in finding which 5 countries experience the highest death rate and total confirmed cases in different states of the US during the most recent date of this dataset. 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, progress=FALSE, message=FALSE, Warning=FALSE)
+library(tidyverse)
+library(lubridate)
+
+#import data
+url_in<-"https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names<-c("time_series_covid19_confirmed_US.csv",
+              "time_series_covid19_confirmed_global.csv",
+              "time_series_covid19_deaths_US.csv",
+              "time_series_covid19_deaths_global.csv")
+urls<-str_c(url_in,file_names)
+urls
+
+# read data file
+us_cases<-read_csv(urls[1])
+global_cases<-read_csv(urls[2])
+us_deaths<-read_csv(urls[3])
+global_deaths<-read_csv(urls[4])
+
+global_cases
+global_deaths
+us_cases
+us_deaths
+
+#clean restructure data
+global_cases<-global_cases %>%
+  pivot_longer(cols=-c('Province/State',
+                       'Country/Region',
+                       Lat,
+                       Long),
+               names_to="date",
+               values_to="cases") %>%
+  select(-c(Lat,Long))
+global_cases
+
+global_deaths<-global_deaths %>%
+  pivot_longer(cols=-c('Province/State',
+                       'Country/Region',
+                       Lat,
+                       Long),
+               names_to="date",
+               values_to="deaths") %>%
+  select(-c(Lat,Long))
+global_deaths
+
+us_cases<-us_cases %>%
+  pivot_longer(cols=-(UID:Combined_Key),
+               names_to="date",
+               values_to="cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date=mdy(date)) %>%
+  select(-c(Lat,Long_))
+us_cases
+
+us_deaths<-us_deaths %>%
+  pivot_longer(cols=-(UID:Population),
+               names_to="date",
+               values_to="deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date=mdy(date)) %>%
+  select(-c(Lat,Long_))
+us_deaths
+
+#combine to have 1 set of global data and 1 set of US data
+global<-global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region='Country/Region',
+         Province_State='Province/State') %>%
+  mutate(date=mdy(date)) %>%
+  unite("Combined_Key",
+        c(Province_State,Country_Region),
+        sep=", ",
+        na.rm=TRUE,
+        remove=FALSE)
+global
+
+us<-us_cases %>%
+  full_join(us_deaths)
+us
+
+#import look-up table for population data
+uid_lookup_url<- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid<-read.csv(uid_lookup_url) %>%
+  select(c(UID, Province_State,Country_Region, Population))
+uid$Province_State[uid$Province_State==""] <- NA
+uid
+
+#combine population data with global data
+global<-global %>%
+  left_join(uid,by=c("Province_State","Country_Region")) %>%
+  select(-c(UID)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+global
+
+
+```
+
+## Top 5 countries experienced the highest deaths per million
+
+The top 5 countries experienced the highest deaths per million are the following:
+
+* Bosnia and Herzegovina
+
+* Bulgaria
+
+* Hungary
+
+* North Macedonia
+
+* Peru
+
+All 5 countries showed a similar trend in their death rate. However, Peru appears to experience earlier death cases and much higher death rate.
+```{r death per million, include = TRUE, echo=FALSE,warning=FALSE, message=FALSE}
+global_by_country<-global %>%
+  group_by(Province_State,Country_Region, date) %>%
+  summarize(cases=sum(cases), deaths=sum(deaths), Population=sum(Population)) %>%
+  mutate(deaths_per_mill=deaths/Population*10000000) %>%
+  select(Province_State,Country_Region, date,cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+#find top 5 countries experience highest deaths per million
+top_5_country<-global_by_country %>%
+  group_by(Country_Region) %>%
+  summarize(deaths=max(deaths), 
+            cases=max(cases),
+            population=max(Population),
+            deaths_per_mill=max(deaths_per_mill)) %>%
+  slice_max(deaths_per_mill,n=5)
+top_5_country
+
+
+top_5_data<- as.data.frame(global_by_country %>%
+                                filter(Country_Region==c('Bosnia and Herzegovina','Bulgaria','Hungary','North Macedonia','Peru')))
+
+ggplot(top_5_data,aes(x=date, y=deaths_per_mill,color=Country_Region, group=Country_Region)) +
+geom_line(linewidth=1) +
+labs(title="Top 5 countries experience the highest deaths rate, per million", x="Date", y="Deaths Per Million") +
+theme_minimal() +
+theme(axis.text.x=element_text(angle=90,hjust=1))
+
+```
+
+### Model on Global data
+
+The model indicated the following:
+
+* The expected value of deaths_per_thou when cases_per_thou is zero is significant. (p<0.001)
+
+* The change in deahts_per_thou for a one unit increase in cases_per_thou is significant. (p<0.001)
+
+* There is approximately 25.4% of the variance in deaths_per_thou.
+
+* The model is statistically significant overall, as indicated by the very small p-value(4.132e014)
+
+The model indicated a positive relationship between deaths_per_thou and cases_per_thou.
+```{r model, include=TRUE, echo=FALSE}
+# create  model
+global_total<- global %>%
+  group_by(Country_Region) %>%
+  summarize(deaths=max(deaths),cases=max(cases),
+            Population=max(Population),
+            cases_per_thou=cases/Population*1000,
+            deaths_per_thou=deaths/Population*1000) %>%
+  filter(cases>0, Population>0)
+
+mod<-lm(deaths_per_thou~cases_per_thou, data=global_total)
+summary(mod)
+
+```
+
+## Most Recent Confirmed cases in the US
+
+The most recent date of this dataset is 03/09/2023. According to the choropleth map, California had the highest number of confirmed COVID-19 cases in the US, followed by Texas, Florida, and New York. These states have consistently reported high cases numbers throughout the pandemic, reflecting their large populations and significant urban centers where the virus spread rapidly. 
+
+```{r confirmed cases, echo=FALSE, message=FALSE}
+#map data
+library(maps)
+states_map <- map_data("state")
+
+#find most recent date
+recent<-max(us$date, na.rm=TRUE)
+
+print(paste("the most recent date is", recent))
+
+#plot the US shape map
+#ggplot(data=us_states)+
+  #geom_sf(fill="lightblue",color="black")
+
+#add data to shape map
+us_most_recent<-us%>%
+  filter(date==recent) %>%
+  group_by(Province_State) %>%
+  summarize(cases=sum(cases),deaths=sum(deaths),Population=sum(Population))
+  
+us_most_recent <- us_most_recent %>%
+  mutate(Province_State=tolower(Province_State))
+
+case_map<-merge(states_map,us_most_recent, by.x="region", by.y="Province_State")
+case_map<-arrange(case_map, group, order)
+
+# plot map
+ggplot(case_map,aes(x=long,y=lat,group=group,fill=cases)) +
+  geom_polygon(color="black") +
+  coord_map("polyconic") +
+  scale_fill_gradient(low="white", high="blue") +
+  labs(title="Most Recent Cases in US by State") +
+  theme_minimal()
+  
+
+
+```
+
+## Conclusion
+
+In this project, I analyze the global and US case and death data to identify which 5 countries had experienced the highest death rate during the pandemic and to examined the distribution of confirmed cases during the most recent date that's available in the dataset. My analysis reveals that Bosnia and Herzegovina,Bulgaria,Hungary,North Macedonia and Peru were the top 5 countries experienced the highest death rate. Peru had experienced much ealier death cases and much higher death rates than other countries. As in the US, up till the most recent date in the dataset, California has the highest confirmed cases. 
+
+Possible sources of bias in the data and my analysis:
+
+* Data entry errors: The data may have data entry errors which can introduce errors and bias into the data set. 
+
+* My analysis may involve interpretation bias as I believed New York would be the one with the highest confirmed cases. However, I relied on data for my conclusion rather than personal beliefs.
